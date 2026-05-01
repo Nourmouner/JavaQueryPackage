@@ -1,0 +1,104 @@
+{
+  "properties": [
+    {
+      "name": "nplus1.detector.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable or disable N+1 query detection. Default: true.",
+      "defaultValue": true
+    },
+    {
+      "name": "nplus1.detector.threshold",
+      "type": "java.lang.Integer",
+      "description": "Minimum number of duplicate queries to flag as an N+1 violation. Default: 3.",
+      "defaultValue": 3
+    },
+    {
+      "name": "nplus1.detector.mode",
+      "type": "io.github.nour.nplus1.spring.autoconfigure.NPlusOneProperties$Mode",
+      "description": "Detection mode: LOG (production-safe), THROW (for tests), or SILENT (metrics only). Default: LOG.",
+      "defaultValue": "LOG"
+    },
+    {
+      "name": "nplus1.detector.application-packages",
+      "type": "java.util.List<java.lang.String>",
+      "description": "Base packages of your application for stack trace filtering. Helps identify the code origin of N+1 queries."
+    },
+    {
+      "name": "nplus1.detector.capture-stack-traces",
+      "type": "java.lang.Boolean",
+      "description": "Whether to capture stack traces for each query. Disable for maximum performance in production. Default: true.",
+      "defaultValue": true
+    },
+    {
+      "name": "nplus1.detector.report-format",
+      "type": "io.github.nour.nplus1.spring.autoconfigure.NPlusOneProperties$ReportFormat",
+      "description": "Report format: CONSOLE (pretty), JSON (structured), or BOTH. Default: CONSOLE.",
+      "defaultValue": "CONSOLE"
+    },
+    {
+      "name": "nplus1.detector.actuator-enabled",
+      "type": "java.lang.Boolean",
+      "description": "Whether to expose the /actuator/nplus1 endpoint. Default: true.",
+      "defaultValue": true
+    },
+    {
+      "name": "nplus1.detector.metrics-enabled",
+      "type": "java.lang.Boolean",
+      "description": "Whether to export Micrometer metrics. Default: true.",
+      "defaultValue": true
+    },
+    {
+      "name": "nplus1.detector.max-history-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum violations to keep in memory for actuator/metrics. Default: 1000.",
+      "defaultValue": 1000
+    },
+    {
+      "name": "nplus1.detector.include-code-examples",
+      "type": "java.lang.Boolean",
+      "description": "Whether to include code examples in console report output. Default: true.",
+      "defaultValue": true
+    },
+    {
+      "name": "nplus1.detector.severity.medium",
+      "type": "java.lang.Integer",
+      "description": "Minimum duplicate queries for MEDIUM severity. Default: 4.",
+      "defaultValue": 4
+    },
+    {
+      "name": "nplus1.detector.severity.high",
+      "type": "java.lang.Integer",
+      "description": "Minimum duplicate queries for HIGH severity. Default: 10.",
+      "defaultValue": 10
+    },
+    {
+      "name": "nplus1.detector.severity.critical",
+      "type": "java.lang.Integer",
+      "description": "Minimum duplicate queries for CRITICAL severity. Default: 50.",
+      "defaultValue": 50
+    },
+    {
+      "name": "nplus1.detector.exclude-paths",
+      "type": "java.util.List<java.lang.String>",
+      "description": "URL path patterns to exclude from detection (Ant-style). Default: /actuator/**, /swagger-ui/**, /v3/api-docs/**."
+    }
+  ],
+  "hints": [
+    {
+      "name": "nplus1.detector.mode",
+      "values": [
+        { "value": "LOG", "description": "Log violations via SLF4J (production-safe)" },
+        { "value": "THROW", "description": "Throw exception on N+1 detection (for tests/dev)" },
+        { "value": "SILENT", "description": "Detect and record but don't log (metrics only)" }
+      ]
+    },
+    {
+      "name": "nplus1.detector.report-format",
+      "values": [
+        { "value": "CONSOLE", "description": "Pretty console output with emoji and formatting" },
+        { "value": "JSON", "description": "Structured JSON for log aggregation (ELK, Datadog)" },
+        { "value": "BOTH", "description": "Output both console and JSON formats" }
+      ]
+    }
+  ]
+}
