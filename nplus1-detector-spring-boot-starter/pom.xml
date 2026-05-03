@@ -6,9 +6,9 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.github.nour</groupId>
+        <groupId>io.github.nourmouner</groupId>
         <artifactId>spring-nplus1-detector</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
+        <version>1.0.0</version>
     </parent>
 
     <artifactId>nplus1-detector-spring-boot-starter</artifactId>
@@ -18,7 +18,7 @@
     <dependencies>
         <!-- Core detection module -->
         <dependency>
-            <groupId>io.github.nour</groupId>
+            <groupId>io.github.nourmouner</groupId>
             <artifactId>nplus1-detector-core</artifactId>
         </dependency>
 

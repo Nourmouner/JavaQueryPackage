@@ -5,9 +5,9 @@
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.github.nour</groupId>
+    <groupId>io.github.nourmouner</groupId>
     <artifactId>spring-nplus1-detector</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <packaging>pom</packaging>
 
     <name>Spring N+1 Detector</name>
@@ -17,7 +17,7 @@
         solution combining runtime detection, test assertions, actuator
         integration, Micrometer metrics, and intelligent fix suggestions.
     </description>
-    <url>https://github.com/nour/spring-nplus1-detector</url>
+    <url>https://github.com/Nourmouner/spring-nplus1-detector</url>
 
     <licenses>
         <license>
@@ -29,18 +29,18 @@
 
     <developers>
         <developer>
-            <id>nour</id>
+            <id>nourmouner</id>
             <name>Nour</name>
             <email>your.email@example.com</email>
-            <url>https://github.com/nour</url>
+            <url>https://github.com/Nourmouner</url>
         </developer>
     </developers>
 
     <scm>
-        <connection>scm:git:git://github.com/nour/spring-nplus1-detector.git</connection>
-        <developerConnection>scm:git:ssh://github.com/nour/spring-nplus1-detector.git</developerConnection>
+        <connection>scm:git:git://github.com/Nourmouner/spring-nplus1-detector.git</connection>
+        <developerConnection>scm:git:ssh://github.com/Nourmouner/spring-nplus1-detector.git</developerConnection>
         <tag>HEAD</tag>
-        <url>https://github.com/nour/spring-nplus1-detector/tree/main</url>
+        <url>https://github.com/Nourmouner/spring-nplus1-detector/tree/main</url>
     </scm>
 
     <modules>
@@ -79,17 +79,17 @@
 
             <!-- Internal modules -->
             <dependency>
-                <groupId>io.github.nour</groupId>
+                <groupId>io.github.nourmouner</groupId>
                 <artifactId>nplus1-detector-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.github.nour</groupId>
+                <groupId>io.github.nourmouner</groupId>
                 <artifactId>nplus1-detector-spring-boot-starter</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.github.nour</groupId>
+                <groupId>io.github.nourmouner</groupId>
                 <artifactId>nplus1-detector-test</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -145,6 +145,10 @@
                                 <goals><goal>jar</goal></goals>
                             </execution>
                         </executions>
+                        <configuration>
+                            <doclint>none</doclint>
+                            <quiet>true</quiet>
+                        </configuration>
                     </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
@@ -155,32 +159,28 @@
                                 <id>sign-artifacts</id>
                                 <phase>verify</phase>
                                 <goals><goal>sign</goal></goals>
+                                <configuration>
+                                    <gpgArguments>
+                                        <arg>--pinentry-mode</arg>
+                                        <arg>loopback</arg>
+                                    </gpgArguments>
+                                </configuration>
                             </execution>
                         </executions>
                     </plugin>
                     <plugin>
-                        <groupId>org.sonatype.plugins</groupId>
-                        <artifactId>nexus-staging-maven-plugin</artifactId>
-                        <version>${nexus-staging-plugin.version}</version>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.5.0</version>
                         <extensions>true</extensions>
                         <configuration>
-                            <serverId>ossrh</serverId>
-                            <nexusUrl>https://s01.oss.sonatype.org/</nexusUrl>
-                            <autoReleaseAfterClose>true</autoReleaseAfterClose>
+                            <publishingServerId>central</publishingServerId>
+                            <autoPublish>true</autoPublish>
+                            <waitUntil>published</waitUntil>
                         </configuration>
                     </plugin>
                 </plugins>
             </build>
-            <distributionManagement>
-                <snapshotRepository>
-                    <id>ossrh</id>
-                    <url>https://s01.oss.sonatype.org/content/repositories/snapshots</url>
-                </snapshotRepository>
-                <repository>
-                    <id>ossrh</id>
-                    <url>https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/</url>
-                </repository>
-            </distributionManagement>
         </profile>
     </profiles>
 </project>
