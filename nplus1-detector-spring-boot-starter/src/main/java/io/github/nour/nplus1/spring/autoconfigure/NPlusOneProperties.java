@@ -64,6 +64,9 @@ public class NPlusOneProperties {
     /** Whether to export Micrometer metrics. */
     private boolean metricsEnabled = true;
 
+    /** Whether to wrap the DataSource to capture accurate query timings. */
+    private boolean proxyDatasource = true;
+
     /** Maximum violations to keep in memory for actuator/metrics. */
     private int maxHistorySize = 1000;
 
@@ -109,6 +112,9 @@ public class NPlusOneProperties {
 
     public boolean isMetricsEnabled() { return metricsEnabled; }
     public void setMetricsEnabled(boolean metricsEnabled) { this.metricsEnabled = metricsEnabled; }
+
+    public boolean isProxyDatasource() { return proxyDatasource; }
+    public void setProxyDatasource(boolean proxyDatasource) { this.proxyDatasource = proxyDatasource; }
 
     public int getMaxHistorySize() { return maxHistorySize; }
     public void setMaxHistorySize(int maxHistorySize) { this.maxHistorySize = maxHistorySize; }

@@ -5,6 +5,7 @@ import io.github.nour.nplus1.core.detection.DetectionListener;
 import io.github.nour.nplus1.core.detection.NPlusOneDetector;
 import io.github.nour.nplus1.core.detection.NPlusOneViolation;
 import io.github.nour.nplus1.core.interceptor.HibernateStatementInspector;
+import io.github.nour.nplus1.core.interceptor.QueryInterceptingDataSource;
 import io.github.nour.nplus1.core.report.ConsoleReporter;
 import io.github.nour.nplus1.core.report.JsonReporter;
 import io.github.nour.nplus1.core.report.Reporter;
@@ -13,232 +14,177 @@ import io.github.nour.nplus1.spring.annotation.SuppressNPlusOneAspect;
 import io.github.nour.nplus1.spring.metrics.NPlusOneMicrometerExporter;
 import io.github.nour.nplus1.spring.web.NPlusOneRequestFilter;
 import io.micrometer.core.instrument.MeterRegistry;
-import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
+import org.springframework.boot.autoconfigure.condition.*;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
+import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
 import org.springframework.boot.autoconfigure.orm.jpa.HibernatePropertiesCustomizer;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import java.util.Map;
+import javax.sql.DataSource;
 
-/**
- * Spring Boot auto-configuration for the N+1 Query Detector.
- *
- * <p>Automatically activates when {@code nplus1.detector.enabled=true} (default)
- * and Spring Data JPA is on the classpath.
- *
- * <p>Configures:
- * <ul>
- *   <li>{@link NPlusOneDetector} — the core detection engine</li>
- *   <li>{@link HibernateStatementInspector} — Hibernate SQL interceptor</li>
- *   <li>{@link NPlusOneRequestFilter} — per-request detection context (if web app)</li>
- *   <li>{@link NPlusOneEndpoint} — actuator endpoint (if actuator is present)</li>
- *   <li>{@link NPlusOneMicrometerExporter} — metrics exporter (if Micrometer is present)</li>
- *   <li>{@link SuppressNPlusOneAspect} — AOP support for @SuppressNPlusOne</li>
- * </ul>
- */
-@AutoConfiguration
+@AutoConfiguration(before = { DataSourceAutoConfiguration.class, HibernateJpaAutoConfiguration.class })
 @ConditionalOnProperty(prefix = "nplus1.detector", name = "enabled", havingValue = "true", matchIfMissing = true)
 @EnableConfigurationProperties(NPlusOneProperties.class)
 public class NPlusOneAutoConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(NPlusOneAutoConfiguration.class);
 
-    // ─── Core Beans ──────────────────────────────────────────────
-
     @Bean
     @ConditionalOnMissingBean
-    public NPlusOneDetector nplusOneDetector(NPlusOneProperties properties) {
-        log.info("🔍 N+1 Query Detector is ACTIVE [mode={}, threshold={}, packages={}]",
-                properties.getMode(), properties.getThreshold(), properties.getApplicationPackages());
+    public NPlusOneDetector nplusOneDetector(NPlusOneProperties p) {
+        log.info("🔍 N+1 Query Detector ACTIVE [mode={}, threshold={}, packages={}]",
+                p.getMode(), p.getThreshold(), p.getApplicationPackages());
 
         NPlusOneDetector detector = NPlusOneDetector.builder()
-                .threshold(properties.getThreshold())
-                .applicationPackages(properties.getApplicationPackages())
-                .maxHistorySize(properties.getMaxHistorySize())
-                .captureStackTraces(properties.isCaptureStackTraces())
-                .severityThresholds(properties.toSeverityThresholds())
+                .threshold(p.getThreshold())
+                .applicationPackages(p.getApplicationPackages())
+                .maxHistorySize(p.getMaxHistorySize())
+                .captureStackTraces(p.isCaptureStackTraces())
+                .severityThresholds(p.toSeverityThresholds())
                 .build();
 
-        // Register reporters as listeners
-        Reporter reporter = createReporter(properties);
-        registerModeListener(detector, properties, reporter);
+        HibernateStatementInspector.registerDetector(detector);
 
+        if (p.getMode() == NPlusOneProperties.Mode.THROW) {
+            detector.addListener(new ThrowingListener());
+        }
         return detector;
     }
 
-    /**
-     * Customizes Hibernate properties to register our StatementInspector.
-     */
     @Bean
     @ConditionalOnClass(name = "org.hibernate.resource.jdbc.spi.StatementInspector")
-    public HibernatePropertiesCustomizer nplusOneHibernateCustomizer(NPlusOneDetector detector) {
-        return hibernateProperties -> {
-            // Register our StatementInspector with Hibernate
-            hibernateProperties.put("hibernate.session_factory.statement_inspector",
-                    HibernateStatementInspector.class.getName());
-
-            // Wire the detector into the inspector
-            HibernateStatementInspector.setDetector(detector);
-
-            log.debug("Registered HibernateStatementInspector for N+1 detection");
-        };
+    public HibernatePropertiesCustomizer nplusOneHibernateCustomizer() {
+        return props -> props.put("hibernate.session_factory.statement_inspector",
+                HibernateStatementInspector.class.getName());
     }
 
-    // ─── Web Integration ─────────────────────────────────────────
+    /**
+     * Wraps every DataSource bean with a query-timing proxy so wasted-time
+     * metrics are accurate. Disable via nplus1.detector.proxy-datasource=false.
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "nplus1.detector", name = "proxy-datasource",
+            havingValue = "true", matchIfMissing = true)
+    public static BeanPostProcessor nplusOneDataSourcePostProcessor(
+            org.springframework.beans.factory.ObjectProvider<NPlusOneDetector> detectorProvider) {
+        return new BeanPostProcessor() {
+            @Override
+            public Object postProcessAfterInitialization(Object bean, String name) {
+                if (bean instanceof DataSource ds && !(bean instanceof QueryInterceptingDataSource)) {
+                    NPlusOneDetector det = detectorProvider.getIfAvailable();
+                    if (det != null) return new QueryInterceptingDataSource(ds, det);
+                }
+                return bean;
+            }
+        };
+    }
 
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
     @ConditionalOnClass(name = "jakarta.servlet.Filter")
     static class WebConfiguration {
-
         @Bean
         @ConditionalOnMissingBean
-        public NPlusOneRequestFilter nplusOneRequestFilter(
-                NPlusOneDetector detector,
-                NPlusOneProperties properties) {
-            log.debug("Registering N+1 request filter for web application");
-            return new NPlusOneRequestFilter(detector, properties);
+        public NPlusOneRequestFilter nplusOneRequestFilter(NPlusOneDetector d, NPlusOneProperties p,
+                                                           Reporter reporter) {
+            return new NPlusOneRequestFilter(d, p, reporter);
         }
     }
 
-    // ─── Actuator Integration ────────────────────────────────────
+    @Bean
+    @ConditionalOnMissingBean
+    public Reporter nplusOneReporter(NPlusOneProperties p) {
+        return switch (p.getReportFormat()) {
+            case CONSOLE -> new ConsoleReporter(p.isIncludeCodeExamples());
+            case JSON -> new JsonReporter();
+            case BOTH -> {
+                ConsoleReporter c = new ConsoleReporter(p.isIncludeCodeExamples());
+                JsonReporter j = new JsonReporter();
+                yield report -> {
+                    c.report(report);
+                    j.report(report);
+                };
+            }
+        };
+    }
 
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
-    @ConditionalOnProperty(prefix = "nplus1.detector", name = "actuator-enabled", havingValue = "true", matchIfMissing = true)
+    @ConditionalOnProperty(prefix = "nplus1.detector", name = "actuator-enabled",
+            havingValue = "true", matchIfMissing = true)
     static class ActuatorConfiguration {
-
         @Bean
         @ConditionalOnMissingBean
-        public NPlusOneEndpoint nplusOneEndpoint(NPlusOneDetector detector) {
-            log.debug("Registering N+1 actuator endpoint at /actuator/nplus1");
-            return new NPlusOneEndpoint(detector);
+        public NPlusOneEndpoint nplusOneEndpoint(NPlusOneDetector d) {
+            return new NPlusOneEndpoint(d);
         }
     }
-
-    // ─── Micrometer Metrics ──────────────────────────────────────
 
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(MeterRegistry.class)
     @ConditionalOnBean(MeterRegistry.class)
-    @ConditionalOnProperty(prefix = "nplus1.detector", name = "metrics-enabled", havingValue = "true", matchIfMissing = true)
+    @ConditionalOnProperty(prefix = "nplus1.detector", name = "metrics-enabled",
+            havingValue = "true", matchIfMissing = true)
     static class MetricsConfiguration {
-
         @Bean
         @ConditionalOnMissingBean
         public NPlusOneMicrometerExporter nplusOneMicrometerExporter(
-                MeterRegistry registry,
-                NPlusOneDetector detector) {
-            log.debug("Registering N+1 Micrometer metrics exporter");
+                MeterRegistry registry, NPlusOneDetector detector) {
             NPlusOneMicrometerExporter exporter = new NPlusOneMicrometerExporter(registry, detector);
             detector.addListener(exporter);
             return exporter;
         }
     }
 
-    // ─── AOP Support ─────────────────────────────────────────────
-
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(name = "org.aspectj.lang.annotation.Aspect")
     static class AopConfiguration {
-
         @Bean
         @ConditionalOnMissingBean
-        public SuppressNPlusOneAspect suppressNPlusOneAspect() {
-            log.debug("Registering @SuppressNPlusOne AOP aspect");
-            return new SuppressNPlusOneAspect();
+        public SuppressNPlusOneAspect suppressNPlusOneAspect(NPlusOneDetector detector) {
+            return new SuppressNPlusOneAspect(detector);
         }
     }
-
-    // ─── Lifecycle ───────────────────────────────────────────────
 
     @PreDestroy
     public void shutdown() {
-        HibernateStatementInspector.clearDetector();
-        log.debug("N+1 Query Detector shutdown complete");
-    }
-
-    // ─── Helper Methods ──────────────────────────────────────────
-
-    private Reporter createReporter(NPlusOneProperties properties) {
-        return switch (properties.getReportFormat()) {
-            case CONSOLE -> new ConsoleReporter(properties.isIncludeCodeExamples());
-            case JSON -> new JsonReporter();
-            case BOTH -> report -> {
-                new ConsoleReporter(properties.isIncludeCodeExamples()).report(report);
-                new JsonReporter().report(report);
-            };
-        };
-    }
-
-    private void registerModeListener(NPlusOneDetector detector, NPlusOneProperties properties, Reporter reporter) {
-        detector.addListener(new DetectionListener() {
-            @Override
-            public void onViolationDetected(NPlusOneViolation violation) {
-                switch (properties.getMode()) {
-                    case LOG -> {} // Reporter handles logging via endContext
-                    case THROW -> throw new NPlusOneDetectedException(violation);
-                    case SILENT -> {} // Metrics-only, no logging
-                }
-            }
-
-            @Override
-            public void onCleanContext(DetectionContext context) {
-                // No action needed for clean contexts in mode listener
-            }
-        });
-
-        // Register reporter as a separate listener that always runs
-        if (properties.getMode() != NPlusOneProperties.Mode.SILENT) {
-            detector.addListener(new ReportingListener(reporter));
-        }
+        // Detector lifecycle handled per-bean; nothing global to clear here.
     }
 
     /**
-     * Listener that generates and outputs reports for each violation.
+     * Listener that throws on violation. Listeners run inside endContext(),
+     * which is called from the filter's finally-block — so we throw AFTER
+     * the response is committed only if mode = THROW. To avoid corrupting
+     * already-committed responses, we throw here only if no response is
+     * in flight (i.e., from a non-web caller like a test).
      */
-    private static class ReportingListener implements DetectionListener {
-        private final Reporter reporter;
-
-        ReportingListener(Reporter reporter) {
-            this.reporter = reporter;
-        }
-
+    static class ThrowingListener implements DetectionListener {
         @Override
         public void onViolationDetected(NPlusOneViolation violation) {
-            // Reports are generated at context end, not per-violation
-            // This listener is kept for future per-violation reporting needs
-        }
-
-        @Override
-        public void onCleanContext(DetectionContext context) {
-            // No report needed for clean contexts
+            // The web filter handles THROW mode by checking the report after endContext;
+            // for non-web callers (tests, batch jobs), throwing here is appropriate.
+            // The filter clears this thread-local before delegating up.
+            if (Boolean.TRUE.equals(NON_WEB_CALLER.get())) {
+                throw new NPlusOneDetectedException(violation);
+            }
         }
     }
 
-    /**
-     * Exception thrown when mode=THROW and an N+1 is detected.
-     */
+    /** Set by non-web callers (tests) to opt into eager throwing. */
+    public static final ThreadLocal<Boolean> NON_WEB_CALLER = ThreadLocal.withInitial(() -> false);
+
     public static class NPlusOneDetectedException extends RuntimeException {
         private final NPlusOneViolation violation;
-
-        public NPlusOneDetectedException(NPlusOneViolation violation) {
-            super("N+1 query detected: " + violation.toString());
-            this.violation = violation;
+        public NPlusOneDetectedException(NPlusOneViolation v) {
+            super("N+1 query detected: " + v); this.violation = v;
         }
-
-        public NPlusOneViolation getViolation() {
-            return violation;
-        }
+        public NPlusOneViolation getViolation() { return violation; }
     }
 }

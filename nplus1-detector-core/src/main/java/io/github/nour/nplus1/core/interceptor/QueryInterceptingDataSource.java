@@ -7,25 +7,21 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.io.PrintWriter;
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.*;
 
-/**
- * Creates a proxied {@link DataSource} that intercepts all SQL queries
- * for N+1 detection with accurate execution timing.
- *
- * <p>Unlike the {@link HibernateStatementInspector} (which captures SQL
- * before execution), this proxy captures the actual execution time of
- * each query, providing more accurate performance data.
- *
- * <p>The proxy is transparent — it wraps the original DataSource and
- * delegates all calls, only adding timing instrumentation to
- * Statement/PreparedStatement execute methods.
- */
 public class QueryInterceptingDataSource implements DataSource {
 
     private static final Logger log = LoggerFactory.getLogger(QueryInterceptingDataSource.class);
+
+    /**
+     * When the inspector is also active, we'd double-record each query. The
+     * inspector runs first (before execute), so we mark the thread and the
+     * inspector skips its record. The proxy then records with real timing.
+     */
+    static final ThreadLocal<Boolean> INSIDE_PROXY_EXEC = ThreadLocal.withInitial(() -> false);
 
     private final DataSource delegate;
     private final NPlusOneDetector detector;
@@ -35,180 +31,111 @@ public class QueryInterceptingDataSource implements DataSource {
         this.detector = detector;
     }
 
-    /**
-     * Returns the original, unwrapped DataSource.
-     */
-    public DataSource getDelegate() {
-        return delegate;
-    }
+    public DataSource getDelegate() { return delegate; }
 
-    @Override
-    public Connection getConnection() throws SQLException {
+    @Override public Connection getConnection() throws SQLException {
         return proxyConnection(delegate.getConnection());
     }
-
-    @Override
-    public Connection getConnection(String username, String password) throws SQLException {
-        return proxyConnection(delegate.getConnection(username, password));
+    @Override public Connection getConnection(String u, String p) throws SQLException {
+        return proxyConnection(delegate.getConnection(u, p));
     }
 
-    private Connection proxyConnection(Connection realConnection) {
+    private Connection proxyConnection(Connection real) {
         return (Connection) Proxy.newProxyInstance(
                 getClass().getClassLoader(),
                 new Class[]{Connection.class},
-                new ConnectionHandler(realConnection, detector)
-        );
+                new ConnectionHandler(real, detector));
     }
 
-    // ─── Delegate methods ────────────────────────────────────────
-
-    @Override
-    public PrintWriter getLogWriter() throws SQLException { return delegate.getLogWriter(); }
-
-    @Override
-    public void setLogWriter(PrintWriter out) throws SQLException { delegate.setLogWriter(out); }
-
-    @Override
-    public void setLoginTimeout(int seconds) throws SQLException { delegate.setLoginTimeout(seconds); }
-
-    @Override
-    public int getLoginTimeout() throws SQLException { return delegate.getLoginTimeout(); }
-
-    @Override
-    public java.util.logging.Logger getParentLogger() {
+    @Override public PrintWriter getLogWriter() throws SQLException { return delegate.getLogWriter(); }
+    @Override public void setLogWriter(PrintWriter o) throws SQLException { delegate.setLogWriter(o); }
+    @Override public void setLoginTimeout(int s) throws SQLException { delegate.setLoginTimeout(s); }
+    @Override public int getLoginTimeout() throws SQLException { return delegate.getLoginTimeout(); }
+    @Override public java.util.logging.Logger getParentLogger() {
         return java.util.logging.Logger.getLogger("N+1-DataSource");
     }
-
-    @Override
-    @SuppressWarnings("unchecked")
+    @Override @SuppressWarnings("unchecked")
     public <T> T unwrap(Class<T> iface) throws SQLException {
         if (iface.isInstance(this)) return (T) this;
         return delegate.unwrap(iface);
     }
-
-    @Override
-    public boolean isWrapperFor(Class<?> iface) throws SQLException {
+    @Override public boolean isWrapperFor(Class<?> iface) throws SQLException {
         return iface.isInstance(this) || delegate.isWrapperFor(iface);
     }
 
-    // ─── Connection proxy handler ────────────────────────────────
+    private static Object invoke(Method m, Object target, Object[] args) throws Throwable {
+        try { return m.invoke(target, args); }
+        catch (InvocationTargetException ite) { throw ite.getCause(); }
+    }
+
+    private static boolean isExecuteMethod(String n) {
+        return "execute".equals(n) || "executeQuery".equals(n)
+                || "executeUpdate".equals(n) || "executeLargeUpdate".equals(n)
+                || "executeBatch".equals(n) || "executeLargeBatch".equals(n);
+    }
 
     private static class ConnectionHandler implements InvocationHandler {
-        private final Connection realConnection;
+        private final Connection real;
         private final NPlusOneDetector detector;
-
-        ConnectionHandler(Connection realConnection, NPlusOneDetector detector) {
-            this.realConnection = realConnection;
-            this.detector = detector;
-        }
+        ConnectionHandler(Connection r, NPlusOneDetector d) { this.real = r; this.detector = d; }
 
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            Object result = method.invoke(realConnection, args);
-
-            // Wrap PreparedStatement to intercept executions
-            if ("prepareStatement".equals(method.getName()) && result instanceof PreparedStatement ps) {
-                String sql = args.length > 0 ? (String) args[0] : null;
-                return proxyPreparedStatement(ps, sql);
-            }
-
-            // Wrap Statement to intercept executions
-            if ("createStatement".equals(method.getName()) && result instanceof Statement stmt) {
-                return proxyStatement(stmt);
-            }
-
+            Object result = QueryInterceptingDataSource.invoke(method, real, args);
+            if ("prepareStatement".equals(method.getName()) && result instanceof PreparedStatement ps)
+                return Proxy.newProxyInstance(getClass().getClassLoader(),
+                        new Class[]{PreparedStatement.class},
+                        new PreparedStatementHandler(ps, args.length > 0 ? (String) args[0] : null, detector));
+            if ("createStatement".equals(method.getName()) && result instanceof Statement st)
+                return Proxy.newProxyInstance(getClass().getClassLoader(),
+                        new Class[]{Statement.class},
+                        new StatementHandler(st, detector));
             return result;
         }
-
-        private PreparedStatement proxyPreparedStatement(PreparedStatement real, String sql) {
-            return (PreparedStatement) Proxy.newProxyInstance(
-                    getClass().getClassLoader(),
-                    new Class[]{PreparedStatement.class},
-                    new PreparedStatementHandler(real, sql, detector)
-            );
-        }
-
-        private Statement proxyStatement(Statement real) {
-            return (Statement) Proxy.newProxyInstance(
-                    getClass().getClassLoader(),
-                    new Class[]{Statement.class},
-                    new StatementHandler(real, detector)
-            );
-        }
     }
-
-    // ─── PreparedStatement proxy handler ─────────────────────────
 
     private static class PreparedStatementHandler implements InvocationHandler {
         private final PreparedStatement real;
         private final String sql;
         private final NPlusOneDetector detector;
-
-        PreparedStatementHandler(PreparedStatement real, String sql, NPlusOneDetector detector) {
-            this.real = real;
-            this.sql = sql;
-            this.detector = detector;
+        PreparedStatementHandler(PreparedStatement r, String s, NPlusOneDetector d) {
+            this.real = r; this.sql = s; this.detector = d;
         }
-
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            String methodName = method.getName();
-
-            // Intercept execute methods for timing
-            if (isExecuteMethod(methodName)) {
-                long startNanos = System.nanoTime();
-                try {
-                    return method.invoke(real, args);
-                } finally {
-                    long elapsed = System.nanoTime() - startNanos;
+            if (isExecuteMethod(method.getName())) {
+                INSIDE_PROXY_EXEC.set(true);
+                long t0 = System.nanoTime();
+                try { return QueryInterceptingDataSource.invoke(method, real, args); }
+                finally {
+                    long elapsed = System.nanoTime() - t0;
                     String executedSql = sql;
-                    // For executeQuery(String) and execute(String), use the provided SQL
-                    if (args != null && args.length > 0 && args[0] instanceof String) {
-                        executedSql = (String) args[0];
-                    }
-                    if (executedSql != null) {
-                        detector.recordQuery(executedSql, null, elapsed);
-                    }
+                    if (args != null && args.length > 0 && args[0] instanceof String s) executedSql = s;
+                    if (executedSql != null) detector.recordQuery(executedSql, null, elapsed);
+                    INSIDE_PROXY_EXEC.set(false);
                 }
             }
-
-            return method.invoke(real, args);
+            return QueryInterceptingDataSource.invoke(method, real, args);
         }
     }
-
-    // ─── Statement proxy handler ─────────────────────────────────
 
     private static class StatementHandler implements InvocationHandler {
         private final Statement real;
         private final NPlusOneDetector detector;
-
-        StatementHandler(Statement real, NPlusOneDetector detector) {
-            this.real = real;
-            this.detector = detector;
-        }
-
+        StatementHandler(Statement r, NPlusOneDetector d) { this.real = r; this.detector = d; }
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            String methodName = method.getName();
-
-            if (isExecuteMethod(methodName) && args != null && args.length > 0 && args[0] instanceof String sql) {
-                long startNanos = System.nanoTime();
-                try {
-                    return method.invoke(real, args);
-                } finally {
-                    long elapsed = System.nanoTime() - startNanos;
-                    detector.recordQuery(sql, null, elapsed);
+            if (isExecuteMethod(method.getName()) && args != null && args.length > 0
+                    && args[0] instanceof String sql) {
+                INSIDE_PROXY_EXEC.set(true);
+                long t0 = System.nanoTime();
+                try { return QueryInterceptingDataSource.invoke(method, real, args); }
+                finally {
+                    detector.recordQuery(sql, null, System.nanoTime() - t0);
+                    INSIDE_PROXY_EXEC.set(false);
                 }
             }
-
-            return method.invoke(real, args);
+            return QueryInterceptingDataSource.invoke(method, real, args);
         }
-    }
-
-    private static boolean isExecuteMethod(String name) {
-        return "execute".equals(name)
-                || "executeQuery".equals(name)
-                || "executeUpdate".equals(name)
-                || "executeLargeUpdate".equals(name);
     }
 }

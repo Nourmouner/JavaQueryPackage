@@ -7,57 +7,44 @@ import org.aspectj.lang.annotation.Aspect;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * AOP aspect that handles the {@link SuppressNPlusOne} annotation.
- *
- * <p>When a method or class is annotated with {@code @SuppressNPlusOne},
- * this aspect temporarily suspends N+1 detection for the duration
- * of that method execution.
- *
- * <p>It works by ending the current detection context before the method,
- * and starting a fresh one after — effectively creating a "hole" in the
- * detection timeline for the suppressed code.
- */
+import jakarta.annotation.PostConstruct;
+
 @Aspect
 public class SuppressNPlusOneAspect {
 
     private static final Logger log = LoggerFactory.getLogger(SuppressNPlusOneAspect.class);
-
-    /** Flag that tells the request filter to skip N+1 analysis. */
     private static final ThreadLocal<Boolean> suppressed = ThreadLocal.withInitial(() -> false);
 
-    /**
-     * Checks if N+1 detection is currently suppressed on this thread.
-     */
-    public static boolean isSuppressed() {
-        return suppressed.get();
+    private final NPlusOneDetector detector;
+
+    public SuppressNPlusOneAspect(NPlusOneDetector detector) {
+        this.detector = detector;
     }
 
+    /** Wires this aspect's flag into the detector so recordQuery can honor it. */
+    @PostConstruct
+    public void register() {
+        detector.setSuppressionCheck(suppressed::get);
+    }
+
+    public static boolean isSuppressed() { return suppressed.get(); }
+
     @Around("@annotation(suppressAnnotation)")
-    public Object aroundMethod(ProceedingJoinPoint joinPoint, SuppressNPlusOne suppressAnnotation) throws Throwable {
-        return executeWithSuppression(joinPoint, suppressAnnotation.reason());
+    public Object aroundMethod(ProceedingJoinPoint jp, SuppressNPlusOne suppressAnnotation) throws Throwable {
+        return executeWithSuppression(jp, suppressAnnotation.reason());
     }
 
     @Around("@within(suppressAnnotation) && !@annotation(io.github.nour.nplus1.spring.annotation.SuppressNPlusOne)")
-    public Object aroundClass(ProceedingJoinPoint joinPoint, SuppressNPlusOne suppressAnnotation) throws Throwable {
-        return executeWithSuppression(joinPoint, suppressAnnotation.reason());
+    public Object aroundClass(ProceedingJoinPoint jp, SuppressNPlusOne suppressAnnotation) throws Throwable {
+        return executeWithSuppression(jp, suppressAnnotation.reason());
     }
 
-    private Object executeWithSuppression(ProceedingJoinPoint joinPoint, String reason) throws Throwable {
-        if (suppressed.get()) {
-            // Already suppressed (nested call) — just proceed
-            return joinPoint.proceed();
-        }
-
-        String methodName = joinPoint.getSignature().toShortString();
-        log.debug("N+1 detection suppressed for {} (reason: {})", methodName,
-                reason.isEmpty() ? "not specified" : reason);
-
+    private Object executeWithSuppression(ProceedingJoinPoint jp, String reason) throws Throwable {
+        if (Boolean.TRUE.equals(suppressed.get())) return jp.proceed();
+        log.debug("N+1 detection suppressed for {} (reason: {})",
+                jp.getSignature().toShortString(), reason.isEmpty() ? "n/a" : reason);
         suppressed.set(true);
-        try {
-            return joinPoint.proceed();
-        } finally {
-            suppressed.set(false);
-        }
+        try { return jp.proceed(); }
+        finally { suppressed.set(false); }
     }
 }

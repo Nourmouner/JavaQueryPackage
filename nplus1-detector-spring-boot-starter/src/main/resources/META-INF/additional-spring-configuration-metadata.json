@@ -48,6 +48,12 @@
       "defaultValue": true
     },
     {
+      "name": "nplus1.detector.proxy-datasource",
+      "type": "java.lang.Boolean",
+      "description": "Wrap the DataSource to capture accurate query timings. Default: true.",
+      "defaultValue": true
+    },
+    {
       "name": "nplus1.detector.max-history-size",
       "type": "java.lang.Integer",
       "description": "Maximum violations to keep in memory for actuator/metrics. Default: 1000.",

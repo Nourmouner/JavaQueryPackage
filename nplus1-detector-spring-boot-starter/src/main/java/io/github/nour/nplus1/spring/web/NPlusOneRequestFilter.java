@@ -1,13 +1,13 @@
 package io.github.nour.nplus1.spring.web;
 
 import io.github.nour.nplus1.core.detection.NPlusOneDetector;
-import io.github.nour.nplus1.core.report.ConsoleReporter;
-import io.github.nour.nplus1.core.report.JsonReporter;
 import io.github.nour.nplus1.core.report.NPlusOneReport;
 import io.github.nour.nplus1.core.report.Reporter;
+import io.github.nour.nplus1.spring.autoconfigure.NPlusOneAutoConfiguration.NPlusOneDetectedException;
 import io.github.nour.nplus1.spring.autoconfigure.NPlusOneProperties;
 import jakarta.servlet.*;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.Ordered;
@@ -17,15 +17,6 @@ import org.springframework.util.AntPathMatcher;
 import java.io.IOException;
 import java.util.List;
 
-/**
- * Servlet filter that creates an N+1 detection context per HTTP request.
- *
- * <p>Automatically wraps each incoming request in a detection context,
- * so all database queries within the request are tracked and analyzed.
- *
- * <p>Runs early in the filter chain (high precedence) to capture all queries,
- * including those in other filters.
- */
 @Order(Ordered.HIGHEST_PRECEDENCE + 10)
 public class NPlusOneRequestFilter implements Filter {
 
@@ -36,72 +27,62 @@ public class NPlusOneRequestFilter implements Filter {
     private final Reporter reporter;
     private final AntPathMatcher pathMatcher = new AntPathMatcher();
 
-    public NPlusOneRequestFilter(NPlusOneDetector detector, NPlusOneProperties properties) {
+    public NPlusOneRequestFilter(NPlusOneDetector detector,
+                                 NPlusOneProperties properties,
+                                 Reporter reporter) {
         this.detector = detector;
         this.properties = properties;
-        this.reporter = createReporter(properties);
+        this.reporter = reporter;
     }
 
     @Override
     public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
             throws IOException, ServletException {
-
-        if (!(request instanceof HttpServletRequest httpRequest)) {
+        if (!(request instanceof HttpServletRequest http)) {
+            chain.doFilter(request, response);
+            return;
+        }
+        if (isExcludedPath(http.getRequestURI())) {
             chain.doFilter(request, response);
             return;
         }
 
-        String path = httpRequest.getRequestURI();
-
-        // Skip excluded paths
-        if (isExcludedPath(path)) {
-            chain.doFilter(request, response);
-            return;
-        }
-
-        String contextName = httpRequest.getMethod() + " " + path;
-
-        detector.startContext(contextName);
+        detector.startContext(http.getMethod() + " " + http.getRequestURI());
+        NPlusOneReport report = null;
         try {
             chain.doFilter(request, response);
         } finally {
-            NPlusOneReport report = detector.endContext();
+            try {
+                report = detector.endContext();
+            } catch (Exception e) {
+                log.warn("N+1 endContext failed: {}", e.getMessage(), e);
+            }
+        }
 
-            // Report results
-            if (report.hasViolations()) {
-                reporter.report(report);
+        // Reporting + headers happen AFTER the chain returns, so we don't risk
+        // throwing inside finally and corrupting the response.
+        if (report != null && report.hasViolations()) {
+            try { reporter.report(report); }
+            catch (Exception e) { log.warn("Reporter failed: {}", e.getMessage(), e); }
 
-                // Add HTTP response headers in development mode
-                if (response instanceof jakarta.servlet.http.HttpServletResponse httpResponse) {
-                    if (!httpResponse.isCommitted()) {
-                        httpResponse.addHeader("X-NPlus1-Violations",
-                                String.valueOf(report.getViolationCount()));
-                        httpResponse.addHeader("X-NPlus1-Total-Queries",
-                                String.valueOf(report.getTotalQueryCount()));
-                        httpResponse.addHeader("X-NPlus1-Wasted-Time-Ms",
-                                String.valueOf(report.getTotalWastedTimeMs()));
-                    }
-                }
+            if (response instanceof HttpServletResponse http2 && !http2.isCommitted()) {
+                http2.addHeader("X-NPlus1-Violations", String.valueOf(report.getViolationCount()));
+                http2.addHeader("X-NPlus1-Total-Queries", String.valueOf(report.getTotalQueryCount()));
+                http2.addHeader("X-NPlus1-Wasted-Time-Ms", String.valueOf(report.getTotalWastedTimeMs()));
+                http2.addHeader("X-NPlus1-Severity", report.getHighestSeverity().name());
+            }
+
+            // THROW mode: only if we can still abort cleanly (response not committed).
+            if (properties.getMode() == NPlusOneProperties.Mode.THROW
+                    && response instanceof HttpServletResponse http2 && !http2.isCommitted()) {
+                throw new NPlusOneDetectedException(report.getViolations().get(0));
             }
         }
     }
 
     private boolean isExcludedPath(String path) {
-        List<String> excludePaths = properties.getExcludePaths();
-        if (excludePaths == null || excludePaths.isEmpty()) return false;
-
-        return excludePaths.stream()
-                .anyMatch(pattern -> pathMatcher.match(pattern, path));
-    }
-
-    private Reporter createReporter(NPlusOneProperties properties) {
-        return switch (properties.getReportFormat()) {
-            case CONSOLE -> new ConsoleReporter(properties.isIncludeCodeExamples());
-            case JSON -> new JsonReporter();
-            case BOTH -> report -> {
-                new ConsoleReporter(properties.isIncludeCodeExamples()).report(report);
-                new JsonReporter().report(report);
-            };
-        };
+        List<String> excludes = properties.getExcludePaths();
+        if (excludes == null || excludes.isEmpty()) return false;
+        return excludes.stream().anyMatch(p -> pathMatcher.match(p, path));
     }
 }
